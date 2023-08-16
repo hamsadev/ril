@@ -1,52 +1,30 @@
-# Prerequisites
-*.d
-
-# Object files
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+*.[oa]
+*~
+# Exclude Drivers folder, can be included
+#again using CubeMX
+Drivers/
+# Ignore build files from Keil uVision
+MDK-ARM/DebugConfig/
+MDK-ARM/project/
+MDK-ARM/RTE/
+# Ignore .o .dbgconf .
+*.dbgconf
 *.o
-*.ko
-*.obj
-*.elf
-
-# Linker output
-*.ilk
+*.crf
+*.d
+*.lnp
 *.map
-*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
-*.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
-*.so
-*.so.*
-*.dylib
-
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
+*.axf
 *.hex
-
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
-
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
+*.sct
+*.dep
+*.lst
+*.fw
+PDT3.htm
+PDT3.build_log.htm
+.code-workspace
+# Doxygen
+/Doxygen/html
+*.htm
