@@ -1,3 +1,14 @@
+/**
+ * @file ril.c
+ * @author Hamid Salehi (hamsame.dev@gmail.com)
+ * @brief 
+ * @version 0.1
+ * @date 2023-08-22
+ * 
+ * @copyright Copyright (c) 2023 Hamid Salehi
+ * 
+ */
+
 #include "ril.h"
 #include "UARTStream.h"
 #include "Str.h"

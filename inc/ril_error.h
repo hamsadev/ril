@@ -1,3 +1,14 @@
+/**
+ * @file ril_error.h
+ * @author Hamid Salehi (hamsam.dev@gmail.com)
+ * @brief 
+ * @version 0.1
+ * @date 2023-12-07
+ * 
+ * @copyright Copyright (c) 2023 Hamid Salehi
+ * 
+ */
+
 #ifndef _RIL_ERROR_H_
 #define _RIL_ERROR_H_
 
@@ -16,6 +27,12 @@ typedef enum {
                                         you may call Ql_RIL_AT_GetErrCode() to get the 
                                         specific error code.*/
 }RIL_ATSndError;
+
+typedef enum {
+    RIL_AT_RSP_FAILED   =  -1, // AT command run FAIL
+    RIL_AT_RSP_SUCCESS  =   0, // AT command run SUCCESS.
+    RIL_AT_RSP_CONTINUE =   1, // Need to wait later AT response
+}RIL_ATRspError;
 
 typedef enum{
   RIL_ERROR_AT                = 0, /**< The response is ERROR.*/         
