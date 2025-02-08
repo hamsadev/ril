@@ -22,9 +22,15 @@ MDK-ARM/RTE/
 *.dep
 *.lst
 *.fw
+*.uvoptx
+*.uvguix.*
 PDT3.htm
 PDT3.build_log.htm
 .code-workspace
 # Doxygen
 /Doxygen/html
 *.htm
+*.vscode
+
+example/NIRA_STM32F4_EVB/MDK-ARM/JLinkLog.txt
+example/NIRA_STM32F4_EVB/MDK-ARM/JLinkSettings.ini
