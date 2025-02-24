@@ -338,9 +338,9 @@
             <v6Rtti>0</v6Rtti>
             <VariousControls>
               <MiscControls></MiscControls>
-              <Define>USE_HAL_DRIVER,STM32F407xx</Define>
+              <Define>USE_HAL_DRIVER,STM32F407xx,__EXAMPLE_TELEPHONY__</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Libs/Str/Src;../Libs/Stream/Src;../../../inc;../Libs/UARTStream</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Libs/Str/Src;../Libs/Stream/Src;../../../inc;../Libs/UARTStream;../Libs/debug</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -395,11 +395,6 @@
           <GroupName>Application/User/Core</GroupName>
           <Files>
             <File>
-              <FileName>main.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/main.c</FilePath>
-            </File>
-            <File>
               <FileName>gpio.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/gpio.c</FilePath>
@@ -423,6 +418,11 @@
               <FileName>stm32f4xx_hal_msp.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f4xx_hal_msp.c</FilePath>
+            </File>
+            <File>
+              <FileName>main.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\main.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -573,6 +573,41 @@
               <FileName>ril.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\src\ril.c</FilePath>
+            </File>
+            <File>
+              <FileName>ril_telephony.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\src\ril_telephony.c</FilePath>
+            </File>
+            <File>
+              <FileName>ril_util.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\src\ril_util.c</FilePath>
+            </File>
+            <File>
+              <FileName>ril_sim.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\src\ril_sim.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>DBG</GroupName>
+          <Files>
+            <File>
+              <FileName>dbg.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libs\debug\dbg.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>examples</GroupName>
+          <Files>
+            <File>
+              <FileName>example_telephony.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\examples\example_telephony.c</FilePath>
             </File>
           </Files>
         </Group>

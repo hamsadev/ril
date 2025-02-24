@@ -1,4 +1,4 @@
-#ifdef __CUSTOMER_CODE__
+#ifdef __EXAMPLE_TELEPHONY__
 
 #include "main.h"
 #include "dma.h"
@@ -7,6 +7,7 @@
 #include <string.h>
 #include "ril.h"
 #include "dbg.h"
+#include "ril_telephony.h"
 
 void SystemClock_Config(void);
 void URCIndicationCallback(RIL_URCInfo* info);
@@ -29,17 +30,17 @@ int main(void)
   /* DEBUG Initialize*/
   DBG_Init(&huart2, DBGLineReceivedCallback);
   DBG("<-- APP STARTED CallExample -->\r\n");
-  
+
   /* RIL Initialize*/
   RIL_initialize(&huart1, URCIndicationCallback);
   DBG("<-- RIL is ready -->\r\n");
-  
+
   while (1)
   {
     DBG_Routine();
     RIL_ServiceRoutine();
     HAL_Delay(120);
-  
+
   }
 }
 
@@ -91,21 +92,67 @@ void SystemClock_Config(void)
 
 void URCIndicationCallback(RIL_URCInfo* info)
 {
-  DBG("<-- Unknown URC code: %d:", info->urcType);
-  for (size_t i = 0; i < info->paramCount; i++)
+  switch (info->urcType)
   {
-    URC_Param* param = &info->params[i];
-    switch (param->type)
+  case URC_CALLER_ID:
+  {
+    char* phoneNumber = info->params[CLIP_PARAM_NUMBER].strValue;
+    int type = info->params[CLIP_PARAM_TYPE].intValue;
+    Enum_CallState callState;
+    RIL_ATSndError ret;
+
+    DBG("<-- Coming call, number:%s, type:%d -->\r\n", phoneNumber, type);
+    ret = RIL_Telephony_Hangup();
+    if (ret == RIL_AT_SUCCESS)
     {
-    case URC_PARAM_INT:
-      DBG("%d,", param->intValue);
-      break;
-    case URC_PARAM_STRING:
-      DBG("%s,", param->strValue);
-      break;
+      DBG("<-- Hang up the coming call -->\r\n");
     }
+    else
+    {
+      DBG("<-- Fail to hang up the coming call -->\r\n");
+    }
+
+    ret = RIL_Telephony_Dial(0, phoneNumber, &callState);
+    if (ret == RIL_AT_SUCCESS && callState == CALL_STATE_OK)
+    {
+      DBG("<-- Calling back... -->\r\n");
+    }
+    else if (RIL_AT_SUCCESS == ret)
+    {
+      DBG("<-- Fail to call back, callState=%d-->\r\n", callState);
+    }
+    else {
+      DBG("<--RIL_Telephony_Dial() failed , ret =%d  -->", ret);
+    }
+    break;
   }
-  DBG("-->\r\n");
+  case URC_CALL_READY:
+    DBG("\r\n<-- Call module is ready -->\r\n");
+    break;
+  case URC_SMS_READY:
+    DBG("\r\n<-- SMS module is ready -->\r\n");
+    break;
+  case URC_SIM_STATUS:
+    break;
+  default:
+    DBG("<-- Unknown URC code: %d:", info->urcType);
+    for (size_t i = 0; i < info->paramCount; i++)
+    {
+
+      URC_Param* param = &info->params[i];
+      switch (param->type)
+      {
+      case URC_PARAM_INT:
+        DBG("%d,", param->intValue);
+        break;
+      case URC_PARAM_STRING:
+        DBG("%s,", param->strValue);
+        break;
+      }
+    }
+    DBG("-->\r\n");
+    break;
+  }
 }
 
 void DBGLineReceivedCallback(char* line, uint16_t len)
