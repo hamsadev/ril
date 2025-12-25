@@ -39,6 +39,13 @@
  */
 typedef bool (*RIL_HTTP_ChunkCB)(const uint8_t* chunk, uint32_t len, void* ctx);
 
+typedef enum{
+    RIL_HTTP_CONTENT_TYPE_APPLICATION_X_WWW_FORM_URL_ENCODED = 0,
+    RIL_HTTP_CONTENT_TYPE_TEXT_PLAIN = 1,
+    RIL_HTTP_CONTENT_TYPE_APPLICATION_OCTET_STREAM = 2,
+    RIL_HTTP_CONTENT_TYPE_MULTIPART_FORM_DATA = 3,
+}RIL_HTTP_ContentType;
+
 /**
  * @brief HTTP operation error codes
  * @details These error codes correspond to Quectel modem HTTP errors
@@ -149,11 +156,11 @@ RIL_HTTP_Err RIL_HTTP_CfgRspHeader(RIL_HTTPClient* cli, bool enable);
 /**
  * @brief Configure Content-Type for request body
  * @param cli Pointer to client context
- * @param mime MIME type string (e.g., "application/json", "text/plain")
+ * @param contentType Content type enum value
  * @return RIL_HTTP_OK on success, error code on failure
- * @note Executes AT+QHTTPCFG="contenttype","<mime>"
+ * @note Executes AT+QHTTPCFG="contenttype",<contentType>
  */
-RIL_HTTP_Err RIL_HTTP_CfgContentType(RIL_HTTPClient* cli, const char* mime);
+RIL_HTTP_Err RIL_HTTP_CfgContentType(RIL_HTTPClient* cli, RIL_HTTP_ContentType contentType);
 
 /**
  * @brief Configure User-Agent header
@@ -175,13 +182,20 @@ RIL_HTTP_Err RIL_HTTP_CfgUserAgent(RIL_HTTPClient* cli, const char* ua);
 RIL_HTTP_Err RIL_HTTP_CfgAuthBasic(RIL_HTTPClient* cli, const char* username, const char* password);
 
 /**
- * @brief Enable/disable multipart form data support
+ * @brief Configure multipart form data parameters
  * @param cli Pointer to client context
- * @param enable If true, enable multipart/form-data for POSTFILE/PUTFILE
+ * @param name Field name for form-data (e.g., "File"). If NULL, only enables form-data mode
+ * @param file_name Filename for form-data (e.g., "File.jpg"). Can be NULL if name is NULL
+ * @param content_type Content-Type for form-data (e.g., "image/jpeg"). Can be NULL
  * @return RIL_HTTP_OK on success, error code on failure
- * @note Executes AT+QHTTPCFG="formdata",<0|1>
+ * @note Executes AT+QHTTPCFG="form/data"[,<name>[,<file_name>[,<content_type>]]]
+ * @details According to Quectel EC200U Application Note:
+ *          - If all parameters are NULL, form-data mode is disabled
+ *          - If name is provided, form-data mode is enabled with specified parameters
+ *          - Field name in multipart/form-data will be set to <name>
  */
-RIL_HTTP_Err RIL_HTTP_CfgFormData(RIL_HTTPClient* cli, bool enable);
+RIL_HTTP_Err RIL_HTTP_CfgFormData(RIL_HTTPClient* cli, const char* name, 
+                                   const char* file_name, char* content_type);
 
 /**
  * @brief Enable/disable connection close notifications

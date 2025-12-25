@@ -302,7 +302,7 @@ static int32_t cb_QFUPL(char* line, uint32_t len, void* ud) {
     int* e = ud;
     if (strncmp(line, "OK", len) == 0) {
         return RIL_ATRSP_SUCCESS;
-    } else if (!strncmp(line, "+QFUPL:", 7)) {
+    } else if (e != NULL && !strncmp(line, "+QFUPL:", 7)) {
         sscanf(line, "+QFUPL: %*u,%d", e);
         return RIL_ATRSP_CONTINUE;
     }
@@ -328,15 +328,15 @@ RIL_FILE_Err RIL_FILE_Upload(const char* dst, const uint8_t* data, uint32_t len,
     /* Phase 1: Send upload command */
     char cmd[128];
     snprintf(cmd, sizeof cmd, "AT+QFUPL=\"%s\",%u,%u,%u", dst, len, tout, ack ? 1 : 0);
-    if (RIL_SendATCmd(cmd, strlen(cmd), NULL, NULL, (tout + 5) * 1000) != RIL_AT_SUCCESS)
-        return RIL_FILE_ERR_TIMEOUT;
+    if (RIL_SendATCmd(cmd, strlen(cmd), NULL, NULL, (tout + 5) * 1000) != RIL_AT_SUCCESS) {
+        return map_err(RIL_AT_GetErrCode());
+    }
 
     /* Phase 2: Send binary data and get result */
-    int err = -1;
-    if (RIL_SendBinaryData(data, len, cb_QFUPL, &err, 30000) != RIL_AT_SUCCESS)
-        return RIL_FILE_ERR_TIMEOUT;
+    if (RIL_SendBinaryData(data, len, cb_QFUPL, NULL, 30000) != RIL_AT_SUCCESS)
+        return map_err(RIL_AT_GetErrCode());
 
-    return map_err(err);
+    return RIL_FILE_OK;
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -370,7 +370,7 @@ RIL_FILE_Err RIL_FILE_Download(const char* src, RIL_FILE_DataCB cb, void* userDa
     };
 
     if (RIL_SendATCmd(cmd, strlen(cmd), cb_copy, &ctx, (wait + 10) * 1000) != RIL_AT_SUCCESS)
-        return RIL_FILE_ERR_TIMEOUT;
+        return map_err(RIL_AT_GetErrCode());
 
     return RIL_FILE_OK;
 }
@@ -417,7 +417,7 @@ RIL_FILE_Err RIL_FILE_Open(const char* p, RIL_FILE_Mode m, RIL_FILE_Handle* out)
 
     int h = -1;
     if (RIL_SendATCmd(cmd, strlen(cmd), cb_QFOPEN, &h, 3000) != RIL_AT_SUCCESS)
-        return RIL_FILE_ERR_TIMEOUT;
+        return map_err(RIL_AT_GetErrCode());
 
     if (h < 0)
         return map_err(h);
@@ -502,12 +502,12 @@ RIL_FILE_Err RIL_FILE_Write(RIL_FILE_Handle h, const uint8_t* buf, uint32_t len,
     char cmd[32];
     snprintf(cmd, sizeof cmd, "AT+QFWRITE=%d,%u", h, len);
     if (RIL_SendATCmd(cmd, strlen(cmd), NULL, NULL, 5000) != RIL_AT_SUCCESS)
-        return RIL_FILE_ERR_TIMEOUT;
+        return map_err(RIL_AT_GetErrCode());
 
     /* Phase 2: Send binary data and get result */
     int wr = 0;
     if (RIL_SendBinaryData(buf, len, cb_QFWRITE, &wr, 30000) != RIL_AT_SUCCESS)
-        return RIL_FILE_ERR_TIMEOUT;
+        return map_err(RIL_AT_GetErrCode());
 
     if (wrote)
         *wrote = wr;
@@ -564,7 +564,7 @@ RIL_FILE_Err RIL_FILE_Position(RIL_FILE_Handle h, uint32_t* off) {
 
     return (RIL_SendATCmd(cmd, strlen(cmd), cb_QFPOS, off, 3000) == RIL_AT_SUCCESS)
                ? RIL_FILE_OK
-               : RIL_FILE_ERR_TIMEOUT;
+               : map_err(RIL_AT_GetErrCode());
 }
 
 /**
@@ -634,7 +634,7 @@ RIL_FILE_Err RIL_FILE_Size(const char* p, uint32_t* s) {
 
     return (RIL_SendATCmd(cmd, strlen(cmd), cb_QFSIZE, s, 3000) == RIL_AT_SUCCESS)
                ? RIL_FILE_OK
-               : RIL_FILE_ERR_TIMEOUT;
+               : map_err(RIL_AT_GetErrCode());
 }
 
 /**
@@ -668,5 +668,5 @@ RIL_FILE_Err RIL_FILE_GetFree(uint32_t* freeB) {
 
     return (RIL_SendATCmd("AT+QFMEM", 7, cb_QFMEM, freeB, 3000) == RIL_AT_SUCCESS)
                ? RIL_FILE_OK
-               : RIL_FILE_ERR_TIMEOUT;
+               : map_err(RIL_AT_GetErrCode());
 }

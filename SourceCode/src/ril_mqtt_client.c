@@ -1,4 +1,5 @@
 #include "ril_mqtt_client.h"
+#include "log.h"
 #include "ril.h"
 #include "ril_socket.h"
 #include <string.h>

@@ -168,12 +168,12 @@ RIL_HTTP_Err RIL_HTTP_CfgRspHeader(RIL_HTTPClient* cli, bool enable) {
  * @param cli Pointer to client context
  * @param mime MIME type string (e.g., "application/json", "text/plain")
  * @return RIL_HTTP_OK on success, error code on failure
- * @details Sends AT+QHTTPCFG="contenttype","<mime>"
+ * @details Sends AT+QHTTPCFG="contenttype",<contentType>
  */
-RIL_HTTP_Err RIL_HTTP_CfgContentType(RIL_HTTPClient* cli, const char* mime) {
-    if (!cli || !mime)
+RIL_HTTP_Err RIL_HTTP_CfgContentType(RIL_HTTPClient* cli, RIL_HTTP_ContentType contentType) {
+    if (!cli)
         return RIL_HTTP_ERR_ARG;
-    return cfg_str("AT+QHTTPCFG=\"contenttype\",\"%s\"", mime);
+    return cfg_u8("AT+QHTTPCFG=\"contenttype\",%u", contentType);
 }
 
 /**
@@ -208,16 +208,55 @@ RIL_HTTP_Err RIL_HTTP_CfgAuthBasic(RIL_HTTPClient* cli, const char* user, const 
 }
 
 /**
- * @brief Enable/disable multipart form data support
+ * @brief Configure multipart form data parameters
  * @param cli Pointer to client context
- * @param enable If true, enable multipart/form-data for POSTFILE/PUTFILE
+ * @param name Field name for form-data (e.g., "File"). If NULL, disables form-data mode
+ * @param file_name Filename for form-data (e.g., "File.jpg"). Can be NULL if name is NULL
+ * @param content_type Content-Type value for form-data (0-3). Use -1 to omit this parameter
  * @return RIL_HTTP_OK on success, error code on failure
- * @details Sends AT+QHTTPCFG="formdata",<0|1>
+ * @details Sends AT+QHTTPCFG="form/data"[,<name>[,<file_name>[,<content_type>]]]
+ *          According to Quectel EC200U Application Note:
+ *          - content_type: 0=application/x-www-form-urlencoded, 1=text/plain,
+ *            2=application/octet-stream, 3=multipart/form-data
+ *          - Format examples:
+ *            * AT+QHTTPCFG="form/data" - disable form-data
+ *            * AT+QHTTPCFG="form/data","<name>" - enable with field name
+ *            * AT+QHTTPCFG="form/data","<name>","<file_name>" - with field name and filename
+ *            * AT+QHTTPCFG="form/data","<name>","<file_name>",<content_type> - with all parameters
  */
-RIL_HTTP_Err RIL_HTTP_CfgFormData(RIL_HTTPClient* cli, bool enable) {
+RIL_HTTP_Err RIL_HTTP_CfgFormData(RIL_HTTPClient* cli, const char* name, const char* file_name,
+                                  char* content_type) {
     if (!cli)
         return RIL_HTTP_ERR_ARG;
-    return cfg_bool("AT+QHTTPCFG=\"formdata\",%u", enable);
+
+    char cmd[256];
+
+    // If name is NULL or empty, disable form-data mode
+    // According to Quectel docs: AT+QHTTPCFG="form/data" (without parameters) disables form-data
+    if (!name || name[0] == '\0') {
+        return (RIL_SendATCmd("AT+QHTTPCFG=\"form/data\"", 22, NULL, NULL, 10000) == RIL_AT_SUCCESS)
+                   ? RIL_HTTP_OK
+                   : RIL_HTTP_ERR_TIMEOUT;
+    }
+
+    // Build command based on provided parameters
+    // Format: AT+QHTTPCFG="form/data"[,<name>[,<file_name>[,<content_type>]]]
+    // name and file_name are strings (quoted), content_type is integer (not quoted)
+    if (content_type && file_name) {
+        // All parameters provided: "form/data","name","file_name",content_type
+        snprintf(cmd, sizeof(cmd), "AT+QHTTPCFG=\"form/data\",\"%s\",\"%s\",\"%s\"", name,
+                 file_name, content_type);
+    } else if (file_name) {
+        // Name and filename provided: "form/data","name","file_name"
+        snprintf(cmd, sizeof(cmd), "AT+QHTTPCFG=\"form/data\",\"%s\",\"%s\"", name, file_name);
+    } else {
+        // Only name provided: "form/data","name"
+        snprintf(cmd, sizeof(cmd), "AT+QHTTPCFG=\"form/data\",\"%s\"", name);
+    }
+
+    return (RIL_SendATCmd(cmd, strlen(cmd), NULL, NULL, 10000) == RIL_AT_SUCCESS)
+               ? RIL_HTTP_OK
+               : RIL_HTTP_ERR_TIMEOUT;
 }
 
 /**
@@ -369,6 +408,258 @@ RIL_HTTP_Err RIL_HTTP_Get(RIL_HTTPClient* cli, uint16_t rspTimeSec) {
 
     /* Send command and wait for URC response */
     if (RIL_SendATCmd(cmd, strlen(cmd), AT_QHTTPGET, &res, tout) != RIL_AT_SUCCESS)
+        return RIL_HTTP_ERR_TIMEOUT;
+
+    return finish_trx(cli, &res);
+}
+
+/**
+ * @brief Perform HTTP GET request with range
+ * @param cli Pointer to client context
+ * @param offset Starting byte offset for range request
+ * @param len Number of bytes to request
+ * @param rspTimeSec Timeout for response in seconds
+ * @return RIL_HTTP_OK on success, error code on failure
+ * @details Sends AT+QHTTPGET=<timeout>,<offset>,<len> and waits for URC response.
+ *          According to Quectel Application Note, this command supports HTTP Range requests.
+ *          Includes additional margin time for network operations.
+ */
+RIL_HTTP_Err RIL_HTTP_GetRange(RIL_HTTPClient* cli, uint32_t offset, uint32_t len,
+                               uint16_t rspTimeSec) {
+    if (!cli)
+        return RIL_HTTP_ERR_ARG;
+
+    TrxRes res = {-1, -1, 0};
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "AT+QHTTPGET=%u,%u,%u", rspTimeSec, offset, len);
+
+    /* Add margin time: rspTimeSec + 10 seconds */
+    uint32_t tout = (rspTimeSec + 10) * 1000;
+
+    /* Send command and wait for URC response */
+    if (RIL_SendATCmd(cmd, strlen(cmd), AT_QHTTPGET, &res, tout) != RIL_AT_SUCCESS)
+        return RIL_HTTP_ERR_TIMEOUT;
+
+    return finish_trx(cli, &res);
+}
+
+/**
+ * @brief Callback for parsing QHTTPPOST URC responses
+ * @param line Response line from modem
+ * @param len Length of response line
+ * @param userData Pointer to TrxRes structure
+ * @return RIL_ATRSP_SUCCESS when URC is found, RIL_ATRSP_CONTINUE otherwise
+ * @details Parses "+QHTTPPOST: <err>,<code>,<len>" URC messages
+ *          According to Quectel Application Note, format is same as QHTTPGET.
+ */
+static int32_t AT_QHTTPPOST(char* line, uint32_t len, void* userData) {
+    TrxRes* r = (TrxRes*) userData;
+
+    if (!strncmp(line, "+QHTTPPOST:", 11)) {
+        sscanf(line, "+QHTTPPOST: %d,%d,%u", &r->err, &r->code, &r->len);
+        return RIL_ATRSP_SUCCESS;
+    }
+    return RIL_ATRSP_CONTINUE;
+}
+
+/**
+ * @brief Callback for handling CONNECT prompt during POST/PUT data transfer
+ * @param line Response line from modem
+ * @param len Length of response line
+ * @param userData User data (not used)
+ * @return RIL_ATRSP_SUCCESS for CONNECT, RIL_ATRSP_CONTINUE otherwise
+ * @details Waits for CONNECT prompt before sending binary data.
+ *          According to Quectel Application Note, modem sends CONNECT after AT+QHTTPPOST/PUT.
+ */
+static int32_t AT_QHTTPPOST_CONNECT(char* line, uint32_t len, void* userData) {
+    (void) userData;
+    if (strncmp(line, "CONNECT", 7) == 0)
+        return RIL_ATRSP_SUCCESS;
+    return RIL_ATRSP_CONTINUE;
+}
+
+/**
+ * @brief Perform HTTP POST request with data
+ * @param cli Pointer to client context
+ * @param body Pointer to request body data
+ * @param bodyLen Length of request body in bytes
+ * @param inputTimeSec Timeout for data input in seconds
+ * @param rspTimeSec Timeout for response in seconds
+ * @return RIL_HTTP_OK on success, error code on failure
+ * @details Performs a two-phase POST operation:
+ *          Phase 1: Send AT+QHTTPPOST=<inputTimeSec>,<bodyLen> and wait for CONNECT
+ *          Phase 2: Send body data and wait for URC response
+ *          According to Quectel Application Note v1.1, Section 4.3.
+ */
+RIL_HTTP_Err RIL_HTTP_Post(RIL_HTTPClient* cli, const void* body, uint32_t bodyLen,
+                           uint16_t inputTimeSec, uint16_t rspTimeSec) {
+    if (!cli || !body || !bodyLen)
+        return RIL_HTTP_ERR_ARG;
+
+    /* Phase 1: Send POST command and wait for CONNECT prompt */
+    char cmd[48];
+    snprintf(cmd, sizeof(cmd), "AT+QHTTPPOST=%u,%u", inputTimeSec, bodyLen);
+
+    if (RIL_SendATCmd(cmd, strlen(cmd), AT_QHTTPPOST_CONNECT, NULL, (inputTimeSec + 5) * 1000) !=
+        RIL_AT_SUCCESS)
+        return RIL_HTTP_ERR_TIMEOUT;
+
+    /* Phase 2: Send body data and wait for URC response */
+    TrxRes res = {-1, -1, 0};
+    uint32_t tout = (rspTimeSec + 10) * 1000;
+
+    if (RIL_SendBinaryData((const uint8_t*) body, bodyLen, AT_QHTTPPOST, &res, tout) !=
+        RIL_AT_SUCCESS)
+        return RIL_HTTP_ERR_TIMEOUT;
+
+    return finish_trx(cli, &res);
+}
+
+/**
+ * @brief Callback for parsing QHTTPPUT URC responses
+ * @param line Response line from modem
+ * @param len Length of response line
+ * @param userData Pointer to TrxRes structure
+ * @return RIL_ATRSP_SUCCESS when URC is found, RIL_ATRSP_CONTINUE otherwise
+ * @details Parses "+QHTTPPUT: <err>,<code>,<len>" URC messages
+ *          According to Quectel Application Note, format is same as QHTTPGET.
+ */
+static int32_t AT_QHTTPPUT(char* line, uint32_t len, void* userData) {
+    TrxRes* r = (TrxRes*) userData;
+
+    if (!strncmp(line, "+QHTTPPUT:", 10)) {
+        sscanf(line, "+QHTTPPUT: %d,%d,%u", &r->err, &r->code, &r->len);
+        return RIL_ATRSP_SUCCESS;
+    }
+    return RIL_ATRSP_CONTINUE;
+}
+
+/**
+ * @brief Perform HTTP PUT request with data
+ * @param cli Pointer to client context
+ * @param body Pointer to request body data
+ * @param bodyLen Length of request body in bytes
+ * @param inputTimeSec Timeout for data input in seconds
+ * @param rspTimeSec Timeout for response in seconds
+ * @return RIL_HTTP_OK on success, error code on failure
+ * @details Performs a two-phase PUT operation:
+ *          Phase 1: Send AT+QHTTPPUT=<inputTimeSec>,<bodyLen> and wait for CONNECT
+ *          Phase 2: Send body data and wait for URC response
+ *          According to Quectel Application Note v1.1, Section 4.4.
+ */
+RIL_HTTP_Err RIL_HTTP_Put(RIL_HTTPClient* cli, const void* body, uint32_t bodyLen,
+                          uint16_t inputTimeSec, uint16_t rspTimeSec) {
+    if (!cli || !body || !bodyLen)
+        return RIL_HTTP_ERR_ARG;
+
+    /* Phase 1: Send PUT command and wait for CONNECT prompt */
+    char cmd[48];
+    snprintf(cmd, sizeof(cmd), "AT+QHTTPPUT=%u,%u", inputTimeSec, bodyLen);
+
+    if (RIL_SendATCmd(cmd, strlen(cmd), AT_QHTTPPOST_CONNECT, NULL, (inputTimeSec + 5) * 1000) !=
+        RIL_AT_SUCCESS)
+        return RIL_HTTP_ERR_TIMEOUT;
+
+    /* Phase 2: Send body data and wait for URC response */
+    TrxRes res = {-1, -1, 0};
+    uint32_t tout = (rspTimeSec + 10) * 1000;
+
+    if (RIL_SendBinaryData((const uint8_t*) body, bodyLen, AT_QHTTPPUT, &res, tout) !=
+        RIL_AT_SUCCESS)
+        return RIL_HTTP_ERR_TIMEOUT;
+
+    return finish_trx(cli, &res);
+}
+
+/**
+ * @brief Callback for parsing QHTTPPOSTFILE URC responses
+ * @param line Response line from modem
+ * @param len Length of response line
+ * @param userData Pointer to TrxRes structure
+ * @return RIL_ATRSP_SUCCESS when URC is found, RIL_ATRSP_CONTINUE otherwise
+ * @details Parses "+QHTTPPOSTFILE: <err>,<code>,<len>" URC messages
+ *          According to Quectel Application Note, format is same as QHTTPGET.
+ */
+static int32_t AT_QHTTPPOSTFILE(char* line, uint32_t len, void* userData) {
+    TrxRes* r = (TrxRes*) userData;
+
+    if (!strncmp(line, "+QHTTPPOSTFILE:", 15)) {
+        sscanf(line, "+QHTTPPOSTFILE: %d,%d,%u", &r->err, &r->code, &r->len);
+        return RIL_ATRSP_SUCCESS;
+    }
+    return RIL_ATRSP_CONTINUE;
+}
+
+/**
+ * @brief Perform HTTP POST request with file data
+ * @param cli Pointer to client context
+ * @param fileName Name of file on modem storage to send
+ * @param rspTimeSec Timeout for response in seconds
+ * @return RIL_HTTP_OK on success, error code on failure
+ * @details Sends AT+QHTTPPOSTFILE="<fileName>",<rspTimeSec> and waits for URC response.
+ *          The file must exist on modem storage (UFS, SD, etc.).
+ *          According to Quectel Application Note v1.1, Section 4.5.
+ */
+RIL_HTTP_Err RIL_HTTP_PostFile(RIL_HTTPClient* cli, const char* fileName, uint16_t rspTimeSec) {
+    if (!cli || !fileName)
+        return RIL_HTTP_ERR_ARG;
+
+    TrxRes res = {-1, -1, 0};
+    char cmd[192];
+    snprintf(cmd, sizeof(cmd), "AT+QHTTPPOSTFILE=\"%s\",%u", fileName, rspTimeSec);
+
+    /* Add margin time: rspTimeSec + 10 seconds */
+    uint32_t tout = (rspTimeSec + 10) * 1000;
+
+    /* Send command and wait for URC response */
+    if (RIL_SendATCmd(cmd, strlen(cmd), AT_QHTTPPOSTFILE, &res, tout) != RIL_AT_SUCCESS)
+        return RIL_HTTP_ERR_TIMEOUT;
+
+    return finish_trx(cli, &res);
+}
+
+/**
+ * @brief Callback for parsing QHTTPPUTFILE URC responses
+ * @param line Response line from modem
+ * @param len Length of response line
+ * @param userData Pointer to TrxRes structure
+ * @return RIL_ATRSP_SUCCESS when URC is found, RIL_ATRSP_CONTINUE otherwise
+ * @details Parses "+QHTTPPUTFILE: <err>,<code>,<len>" URC messages
+ *          According to Quectel Application Note, format is same as QHTTPGET.
+ */
+static int32_t AT_QHTTPPUTFILE(char* line, uint32_t len, void* userData) {
+    TrxRes* r = (TrxRes*) userData;
+
+    if (!strncmp(line, "+QHTTPPUTFILE:", 14)) {
+        sscanf(line, "+QHTTPPUTFILE: %d,%d,%u", &r->err, &r->code, &r->len);
+        return RIL_ATRSP_SUCCESS;
+    }
+    return RIL_ATRSP_CONTINUE;
+}
+
+/**
+ * @brief Perform HTTP PUT request with file data
+ * @param cli Pointer to client context
+ * @param fileName Name of file on modem storage to send
+ * @param rspTimeSec Timeout for response in seconds
+ * @return RIL_HTTP_OK on success, error code on failure
+ * @details Sends AT+QHTTPPUTFILE="<fileName>",<rspTimeSec> and waits for URC response.
+ *          The file must exist on modem storage (UFS, SD, etc.).
+ *          According to Quectel Application Note v1.1, Section 4.6.
+ */
+RIL_HTTP_Err RIL_HTTP_PutFile(RIL_HTTPClient* cli, const char* fileName, uint16_t rspTimeSec) {
+    if (!cli || !fileName)
+        return RIL_HTTP_ERR_ARG;
+
+    TrxRes res = {-1, -1, 0};
+    char cmd[192];
+    snprintf(cmd, sizeof(cmd), "AT+QHTTPPUTFILE=\"%s\",%u", fileName, rspTimeSec);
+
+    /* Add margin time: rspTimeSec + 10 seconds */
+    uint32_t tout = (rspTimeSec + 10) * 1000;
+
+    /* Send command and wait for URC response */
+    if (RIL_SendATCmd(cmd, strlen(cmd), AT_QHTTPPUTFILE, &res, tout) != RIL_AT_SUCCESS)
         return RIL_HTTP_ERR_TIMEOUT;
 
     return finish_trx(cli, &res);
@@ -609,6 +900,46 @@ RIL_HTTP_Err RIL_HTTP_ReadFileStream(RIL_HTTPClient* cli, const char* fileName, 
 
     if (cli->lastErr == RIL_HTTP_ERR || cli->lastErr == RIL_HTTP_ERR_CHUNK_FAILED)
         return cli->lastErr;
+
+    cli->lastErr = RIL_HTTP_OK;
+    return cli->lastErr;
+}
+
+/* ══════════════════════════════════════════════════════════════════════ */
+/*                        Connection Management                           */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Callback for parsing QHTTPSTOP responses
+ * @param line Response line from modem
+ * @param len Length of response line
+ * @param userData User data (not used)
+ * @return RIL_ATRSP_SUCCESS for OK, RIL_ATRSP_CONTINUE otherwise
+ * @details Waits for OK response after sending QHTTPSTOP command.
+ *          According to Quectel Application Note, QHTTPSTOP terminates current HTTP session.
+ */
+static int32_t AT_QHTTPSTOP(char* line, uint32_t len, void* userData) {
+    (void) userData;
+    if (strncmp(line, "OK", 2) == 0)
+        return RIL_ATRSP_SUCCESS;
+    return RIL_ATRSP_CONTINUE;
+}
+
+/**
+ * @brief Stop/abort current HTTP operation
+ * @param cli Pointer to client context
+ * @return RIL_HTTP_OK on success, error code on failure
+ * @details Sends AT+QHTTPSTOP to terminate current HTTP session.
+ *          This command can be used to abort ongoing HTTP operations.
+ *          According to Quectel Application Note v1.1, Section 4.7.
+ */
+RIL_HTTP_Err RIL_HTTP_Stop(RIL_HTTPClient* cli) {
+    if (!cli)
+        return RIL_HTTP_ERR_ARG;
+
+    /* Send stop command and wait for OK */
+    if (RIL_SendATCmd("AT+QHTTPSTOP", 12, AT_QHTTPSTOP, NULL, 10000) != RIL_AT_SUCCESS)
+        return RIL_HTTP_ERR_TIMEOUT;
 
     cli->lastErr = RIL_HTTP_OK;
     return cli->lastErr;

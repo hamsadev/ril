@@ -20,10 +20,12 @@ A comprehensive C library for interfacing with Quectel cellular modems (EC200U, 
 
 ### Core Functionality
 - **AT Command Interface**: Synchronous blocking AT command execution
+- **Thread-Safe Operations**: Mutex-protected operations for multi-threaded environments
 - **Stream Management**: Efficient UART data streaming with DMA support
 - **Error Handling**: Comprehensive error reporting and recovery
 - **Logging System**: Configurable debug logging with multiple levels
 - **URC Support**: Non-blocking Unsolicited Result Code handling for real-time events
+- **Power Management**: Automatic power cycle and restart support with callback interface
 
 ### Communication Modules
 - **SMS**: Send/receive text messages, PDU support, concatenated SMS
@@ -63,6 +65,7 @@ This library is designed for Quectel cellular modems:
 ### Dependencies
 - STM32 HAL Library
 - CMSIS (Cortex Microcontroller Software Interface Standard)
+- CMSIS-RTOS2 (optional, for thread-safe operations when `RIL_USE_OS=1`)
 - [Param Library](https://github.com/Ali-Mirghasemi/Param) - String parameter parsing
 - [Str Library](https://github.com/Ali-Mirghasemi/Str) - String manipulation functions
 - [Stream Library](https://github.com/Ali-Mirghasemi/Stream) - Stream buffer implementation
@@ -111,11 +114,7 @@ Ensure your UART is properly configured for modem communication:
 - Flow control: None
 - **DMA or Interrupt mode must be enabled for both TX and RX**
 
-### UART Configuration Details
-
-The RIL library requires either DMA or Interrupt mode to be enabled for proper operation. The RIL library handles all UART communication internally through the UART handle passed to `RIL_initialize(&huart1, NULL)`.
-
-**Note**: Polling mode is not supported as it would block the main thread.
+**Note**: Polling mode is not supported as it would block the main thread. The library requires DMA or Interrupt mode for proper operation.
 
 ## Quick Start
 
@@ -141,7 +140,9 @@ int main(void)
     SerialLog_Init(&huart5);  // Use different UART for debug
     
     // Initialize RIL
-    if (RIL_initialize(&huart1, NULL) != RIL_AT_SUCCESS)
+    // Parameters: UART handle, URC callback, power command callback, init result callback
+    // Note: powerCommandCb and initialResultCb can be NULL if not needed
+    if (RIL_initialize(&huart1, NULL, NULL, NULL) != RIL_AT_SUCCESS)
     {
         logError("RIL initialization failed");
         while(1);
@@ -228,6 +229,42 @@ void http_get_example(void)
 }
 ```
 
+### HTTP POST Example
+
+```c
+#include "ril_http.h"
+
+void http_post_example(void)
+{
+    RIL_HTTPClient client;
+    
+    // Initialize HTTP client
+    RIL_HTTP_Init(&client, 1, 0);
+    RIL_HTTP_CfgContextId(&client, 1);
+    
+    // Configure content type
+    RIL_HTTP_CfgContentType(&client, RIL_HTTP_CONTENT_TYPE_APPLICATION_X_WWW_FORM_URL_ENCODED);
+    
+    // Set URL
+    if (RIL_HTTP_SetURL(&client, "http://httpbin.org/post", 30) == RIL_HTTP_OK)
+    {
+        // POST data
+        const char* post_data = "field1=value1&field2=value2";
+        if (RIL_HTTP_Post(&client, post_data, strlen(post_data), 10, 30) == RIL_HTTP_OK)
+        {
+            // Read response
+            uint8_t buffer[1024];
+            uint32_t actual_len;
+            if (RIL_HTTP_ReadToBuf(&client, buffer, sizeof(buffer), &actual_len, 30) == RIL_HTTP_OK)
+            {
+                logInfo("POST Response: %.*s", actual_len, buffer);
+            }
+        }
+    }
+}
+```
+
+
 ## API Reference
 
 ### Understanding AT Commands vs URCs
@@ -258,10 +295,16 @@ RIL_ServiceRoutine();  // Handles incoming URCs without blocking
 
 #### Initialization
 ```c
-RIL_ATSndError RIL_initialize(UART_HandleTypeDef* uart, RIL_URCIndicationCallback urcCb);
+RIL_ATSndError RIL_initialize(UART_HandleTypeDef* uart, 
+                              RIL_URCIndicationCallback urcCb,
+                              RIL_PowerCommandCallback powerCommandCb,
+                              RIL_InitialResultCallback initialResultCb);
 RIL_ATSndError RIL_deInitialize(void);
 void RIL_ServiceRoutine(void);
+bool RIL_IsModulePowered(void);
 ```
+
+**Note**: `powerCommandCb` and `initialResultCb` can be `NULL` if not needed. The power command callback is used for automatic power cycle during initialization failures.
 
 #### AT Command Interface
 ```c
@@ -279,73 +322,16 @@ RIL_ATSndError RIL_SendBinaryData(const uint8_t* data, uint32_t dataLen,
 void RIL_ServiceRoutine(void);
 ```
 
-### SMS Module (ril_sms.h)
+### Module APIs
 
-#### Send SMS
-```c
-int32_t RIL_SMS_SendSMS_Text(char* pNumber, uint8_t uNumberLen, 
-                             LIB_SMS_CharSetEnum eCharset,
-                             uint8_t* pMsg, uint32_t uMsgLen, uint32_t* pMsgRef);
-int32_t RIL_SMS_SendSMS_PDU(char* pPDUStr, uint32_t uPDUStrLen, uint32_t* pMsgRef);
-```
-
-#### Read SMS
-```c
-int32_t RIL_SMS_ReadSMS_Text(uint32_t uIndex, LIB_SMS_CharSetEnum eCharset,
-                             ST_RIL_SMS_TextInfo* pTextInfo);
-int32_t RIL_SMS_ReadSMS_PDU(uint32_t uIndex, ST_RIL_SMS_PDUInfo* pPDUInfo);
-```
-
-### Network Module (ril_network.h)
-
-#### Network Status
-```c
-RIL_ATSndError RIL_NW_GetGSMState(RIL_NW_State* stat);
-RIL_ATSndError RIL_NW_GetGPRSState(RIL_NW_State* stat);
-RIL_ATSndError RIL_NW_GetSignalQuality(uint8_t* rssi, uint8_t* ber);
-```
-
-#### APN Configuration
-```c
-RIL_ATSndError RIL_NW_SetAPN(uint8_t pdp_id, RIL_NW_ContextType contextType, char* apn);
-RIL_ATSndError RIL_NW_OpenPDPContext(uint8_t pdp_id);
-RIL_ATSndError RIL_NW_ClosePDPContext(uint8_t pdp_id);
-```
-
-### HTTP Module (ril_http.h)
-
-#### Client Management
-```c
-void RIL_HTTP_Init(RIL_HTTPClient* cli, uint8_t cid, uint8_t sslctx);
-RIL_HTTP_Err RIL_HTTP_CfgContextId(RIL_HTTPClient* cli, uint8_t cid);
-RIL_HTTP_Err RIL_HTTP_CfgSSL(RIL_HTTPClient* cli, uint8_t sslctx);
-```
-
-#### HTTP Operations
-```c
-RIL_HTTP_Err RIL_HTTP_SetURL(RIL_HTTPClient* cli, const char* url, uint16_t urlTimeoutSec);
-RIL_HTTP_Err RIL_HTTP_Get(RIL_HTTPClient* cli, uint16_t rspTimeSec);
-RIL_HTTP_Err RIL_HTTP_Post(RIL_HTTPClient* cli, const void* body, uint32_t bodyLen,
-                           uint16_t inputTimeSec, uint16_t rspTimeSec);
-```
-
-### MQTT Module (ril_mqtt_client.h)
-
-#### Client Configuration
-```c
-RIL_MQTT_Err RIL_MQTT_InitClient(RIL_MQTTClient* client, const char* clientId,
-                                 const char* username, const char* password,
-                                 uint16_t keepAlive, bool cleanSession);
-RIL_MQTT_Err RIL_MQTT_ConfigSSL(RIL_MQTTClient* client, MQTT_SSLMode sslMode, uint8_t sslCtxId);
-```
-
-#### MQTT Operations
-```c
-RIL_MQTT_Err RIL_MQTT_Open(RIL_MQTTClient* client, const char* host, uint16_t port);
-RIL_MQTT_Err RIL_MQTT_Connect(RIL_MQTTClient* client);
-RIL_MQTT_Err RIL_MQTT_Publish(RIL_MQTTClient* client, uint16_t msgId, const char* topic,
-                              const uint8_t* payload, uint32_t length, Enum_Qos qos, bool retain);
-```
+For detailed API documentation, refer to the header files:
+- **SMS**: `ril_sms.h` - Send/receive SMS messages
+- **Network**: `ril_network.h` - Network registration, APN configuration, signal quality
+- **HTTP**: `ril_http.h` - HTTP/HTTPS client with GET, POST, PUT, file operations
+- **MQTT**: `ril_mqtt_client.h` - MQTT 3.1/3.1.1 client with SSL support
+- **Socket**: `ril_socket.h` - TCP/UDP socket operations
+- **SIM**: `ril_sim.h` - SIM card management
+- **File**: `ril_file.h` - File system operations on modem storage
 
 ## Examples
 
@@ -359,47 +345,49 @@ RIL_MQTT_Err RIL_MQTT_Publish(RIL_MQTTClient* client, uint16_t msgId, const char
 
 void iot_application(void)
 {
-    // 1. Initialize RIL
-    RIL_initialize(&huart1, NULL);
+    // Initialize RIL
+    RIL_initialize(&huart1, NULL, NULL, NULL);
     
-    // 2. Check SIM status
-    Enum_SIMState sim_state;
-    RIL_SIM_GetSimState(&sim_state);
-    if (sim_state != SIM_STAT_READY) {
-        logError("SIM not ready");
-        return;
-    }
-    
-    // 3. Configure network
+    // Configure network and wait for registration
     RIL_NW_SetAPN(1, RIL_NW_ContextType_IPV4, "internet");
     RIL_NW_OpenPDPContext(1);
+    // ... wait for network registration ...
     
-    // 4. Wait for network registration
-    RIL_NW_State gsm_state, gprs_state;
-    do {
-        RIL_NW_GetGSMState(&gsm_state);
-        RIL_NW_GetGPRSState(&gprs_state);
-        HAL_Delay(1000);
-    } while (gsm_state != RIL_NW_State_Registered || 
-             gprs_state != RIL_NW_State_Registered);
-    
-    // 5. Send HTTP request
+    // Send HTTP POST request
     RIL_HTTPClient http_client;
     RIL_HTTP_Init(&http_client, 1, 0);
     RIL_HTTP_SetURL(&http_client, "https://api.thingspeak.com/update", 30);
     RIL_HTTP_Post(&http_client, "field1=25.6", 11, 10, 30);
     
-    // 6. Connect to MQTT broker
+    // Connect to MQTT and publish data
     RIL_MQTTClient mqtt_client;
     RIL_MQTT_InitClient(&mqtt_client, "stm32_client", NULL, NULL, 60, true);
     RIL_MQTT_Open(&mqtt_client, "broker.hivemq.com", 1883);
     RIL_MQTT_Connect(&mqtt_client);
-    
-    // 7. Publish sensor data
-    char payload[64];
-    sprintf(payload, "{\"temperature\":%.1f,\"humidity\":%.1f}", 25.6, 60.2);
-    RIL_MQTT_Publish(&mqtt_client, 1, "sensors/data", (uint8_t*)payload, 
-                     strlen(payload), QOS_1, false);
+    RIL_MQTT_Publish(&mqtt_client, 1, "sensors/data", payload, len, QOS_1, false);
+}
+```
+
+## Advanced Features
+
+### Thread Safety
+
+When `RIL_USE_OS=1` is defined, the library provides thread-safe operations using mutex protection. Requires CMSIS-RTOS2 and RTOS kernel initialization before `RIL_initialize()`.
+
+### Power Management
+
+The library supports automatic power management through callbacks. Provide a `RIL_PowerCommandCallback` to enable automatic power cycle during initialization failures (up to 3 retries).
+
+```c
+void power_callback(RIL_PowerCommand cmd, uint32_t delay_ms) {
+    switch(cmd) {
+        case RIL_POWER_COMMAND_RESTART:
+            HAL_GPIO_WritePin(MODEM_PWR_GPIO_Port, MODEM_PWR_Pin, GPIO_PIN_RESET);
+            HAL_Delay(delay_ms);
+            HAL_GPIO_WritePin(MODEM_PWR_GPIO_Port, MODEM_PWR_Pin, GPIO_PIN_SET);
+            break;
+        // ... other cases
+    }
 }
 ```
 
@@ -415,15 +403,13 @@ void iot_application(void)
 #### Buffer Sizes
 ```c
 #define RIL_RX_STREAM_SIZE 512  // Receive buffer size
-#define RIL_TX_STREAM_SIZE 256  // Transmit buffer size
+#define RIL_TX_STREAM_SIZE 512  // Transmit buffer size (increased from 256)
 ```
 
-### Runtime Configuration
-
-#### Modem Settings
-- Power management: Configure according to your power requirements
-- Network selection: Automatic or manual operator selection
-- APN settings: Configure based on your carrier
+#### OS Support (Thread Safety)
+```c
+#define RIL_USE_OS 1  // Enable thread-safe operations (requires CMSIS-RTOS2)
+```
 
 ## Error Handling
 
@@ -472,6 +458,8 @@ switch (result) {
    - Check UART configuration
    - Verify modem power supply
    - Ensure proper baud rate
+   - If using power management, verify power command callback is properly implemented
+   - Check if modem responds to AT commands using `RIL_IsModulePowered()`
 
 2. **Network Registration Issues**
    - Check SIM card insertion
@@ -497,20 +485,7 @@ switch (result) {
 
 ## Contributing
 
-We welcome contributions to improve the RIL library. Please follow these guidelines:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes with proper documentation
-4. Test thoroughly on target hardware
-5. Submit a pull request with detailed description
-
-### Development Setup
-
-1. Clone the repository
-2. Open the example project in STM32CubeIDE
-3. Configure your hardware settings
-4. Build and test your changes
+We welcome contributions! Please fork the repository, create a feature branch, make your changes with proper documentation, test thoroughly, and submit a pull request.
 
 ## License
 
@@ -518,10 +493,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Support
 
-For technical support and questions:
-- Create an issue on GitHub
-- Check the documentation and examples
-- Review the troubleshooting section
+For technical support, create an issue on GitHub or check the troubleshooting section above.
 
 ---
 

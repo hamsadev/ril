@@ -10,6 +10,7 @@
  */
 
 #include "ril.h"
+#include "cmsis_os2.h"
 #include "ril_urc.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -27,12 +28,17 @@ typedef struct {
     UARTStream stream;
     RILState state;
     RIL_URCIndicationCallback urcIndicationCallback;
+    RIL_PowerCommandCallback powerCommandCallback;
     RIL_OperationMode operationMode;
     uint16_t expectedBytes; // expected bytes to receive in binary mode
     uint16_t error;
     uint8_t streamRxBuff[RIL_RX_STREAM_SIZE];
     uint8_t streamTxBuff[RIL_TX_STREAM_SIZE];
     uint8_t initialized : 1;
+#if RIL_USE_OS
+    osMutexId_t mutex;
+    osMutexAttr_t mutex_attr;
+#endif
 } RILContext;
 
 static RILContext rilCtx;
@@ -41,6 +47,18 @@ static int16_t _lineIsError(const char* line, uint32_t len, uint16_t* errCode);
 static bool _lineIsURC(const char* line);
 static bool RIL_ParseURC(const char* line, RIL_URCInfo* urcInfo);
 static int32_t okRespCallback(char* line, uint32_t len, void* userData);
+static void RIL_PowerRestart(RIL_PowerCommandCallback powerCommandCb);
+static void _RIL_Lock(void);
+static void _RIL_Unlock(void);
+
+// Helper functions for common operations
+static RIL_ATSndError _RIL_AcquireAccess(void);
+static void _RIL_ReleaseAccess(bool resetOperationMode);
+static uint32_t _RIL_GetCurrentTick(void);
+static void _RIL_Delay(uint32_t ms);
+static RIL_ATSndError _RIL_WaitForResponse(char* lineCache, uint32_t timeOut,
+                                           Callback_ATResponse atRsp_callBack, void* userData,
+                                           bool checkEcho, const char* echoCmd);
 
 RILState RIL_GetState(void) {
     return rilCtx.state;
@@ -80,17 +98,17 @@ RIL_ATSndError RIL_deInitialize(void) {
             RIL_SendATCmd(RIL_STR("ATV1"), okRespCallback, NULL, 500);
 
             // URC activation
-						if(rilCtx.urcIndicationCallback)
-						{
-							RIL_SendATCmd(RIL_STR("AT+QURCCFG=\"urcport\",\"uart1\""), okRespCallback, NULL, 500);
-							
-							for (size_t i = 0; i < URC_MAX; i++) {
-                if ((char*) URC_AT_COMMANDS[i] != NULL) {
-                    RIL_SendATCmd((char*) URC_AT_COMMANDS[i], strlen(URC_AT_COMMANDS[i]),
-                                  okRespCallback, NULL, 500);
+            if (rilCtx.urcIndicationCallback) {
+                RIL_SendATCmd(RIL_STR("AT+QURCCFG=\"urcport\",\"uart1\""), okRespCallback, NULL,
+                              500);
+
+                for (size_t i = 0; i < URC_MAX; i++) {
+                    if ((char*) URC_AT_COMMANDS[i] != NULL) {
+                        RIL_SendATCmd((char*) URC_AT_COMMANDS[i], strlen(URC_AT_COMMANDS[i]),
+                                      okRespCallback, NULL, 500);
+                    }
                 }
-							}
-						}
+            }
 
             return RIL_AT_SUCCESS;
         }
@@ -98,12 +116,18 @@ RIL_ATSndError RIL_deInitialize(void) {
     return RIL_AT_FAILED;
 }
 
-RIL_ATSndError RIL_initialize(UART_HandleTypeDef* uart, RIL_URCIndicationCallback urcCb) {
+RIL_ATSndError RIL_initialize(UART_HandleTypeDef* uart, RIL_URCIndicationCallback urcCb,
+                              RIL_PowerCommandCallback powerCommandCb,
+                              RIL_InitialResultCallback initialResultCb) {
     if (rilCtx.initialized) {
+        if (initialResultCb) {
+            initialResultCb(RIL_AT_SUCCESS);
+        }
         return RIL_AT_SUCCESS;
     }
 
     rilCtx.urcIndicationCallback = urcCb;
+    rilCtx.powerCommandCallback = powerCommandCb;
     rilCtx.error = RIL_AT_UNINITIALIZED;
     rilCtx.state = RIL_READY;
 
@@ -115,29 +139,69 @@ RIL_ATSndError RIL_initialize(UART_HandleTypeDef* uart, RIL_URCIndicationCallbac
     rilCtx.operationMode = RIL_OperationMode_Normal;
     rilCtx.initialized = true;
 
-    RIL_ATSndError ret = RIL_deInitialize();
+#if RIL_USE_OS
+    // Initialize mutex for thread-safe access
+    rilCtx.mutex_attr.name = "RIL_Mutex";
+    rilCtx.mutex_attr.attr_bits = osMutexRecursive;
+    rilCtx.mutex = osMutexNew(&rilCtx.mutex_attr);
+    if (rilCtx.mutex == NULL) {
+        return RIL_AT_FAILED;
+    }
+#endif
 
-    return ret;
+    // Initialize with power management and restart logic
+    uint8_t retryCount = 0;
+    bool moduleRestarted = false;
+    RIL_ATSndError ret;
+
+    while (retryCount < 3) {
+        // Try to initialize the module
+        ret = RIL_deInitialize();
+
+        if (ret == RIL_AT_SUCCESS) {
+            // Check if we need to restart the module
+            if (moduleRestarted) {
+                if (initialResultCb) {
+                    initialResultCb(RIL_AT_SUCCESS);
+                }
+                return RIL_AT_SUCCESS;
+            } else {
+                // Power off and restart the module
+                RIL_PowerRestart(rilCtx.powerCommandCallback);
+
+                moduleRestarted = true;
+                retryCount++;
+            }
+        } else {
+            // Initialization failed, try power cycle
+            RIL_PowerRestart(rilCtx.powerCommandCallback);
+            moduleRestarted = true;
+            retryCount++;
+        }
+    }
+
+    return RIL_AT_TIMEOUT;
 }
 
 void RIL_ServiceRoutine(void) {
-    if (rilCtx.state == RIL_READY) {
-        if (IStream_available(&rilCtx.stream.Input) > 0) {
-            char lineCache[RIL_LINE_LEN];
-            Stream_LenType len = IStream_readBytesUntilPattern(
-                &rilCtx.stream.Input, (uint8_t*) CRLF, CRLFLen, (uint8_t*) lineCache, RIL_LINE_LEN);
-            if (len > CRLFLen) {
-                len -= CRLFLen;
-                lineCache[len] = 0; // Null-terminate the received line
+    // Only process URC when RIL is ready (not busy with AT command)
+    // This is safe because AT commands use Mutex for exclusive access
+    if (rilCtx.state == RIL_READY && IStream_available(&rilCtx.stream.Input) > 0) {
+        char lineCache[RIL_LINE_LEN];
+        Stream_LenType len = IStream_readBytesUntilPattern(
+            &rilCtx.stream.Input, (uint8_t*) CRLF, CRLFLen, (uint8_t*) lineCache, RIL_LINE_LEN);
+        if (len > CRLFLen) {
+            len -= CRLFLen;
+            lineCache[len] = 0; // Null-terminate the received line
 
-                RIL_URCInfo urcInfo;
-                bool urcDetected = RIL_ParseURC(lineCache, &urcInfo); // Parse URC parameters
-                if (urcDetected) {
-                    RIL_LOG_TRACE("URC detected: %u ,%s", urcInfo.urcType, lineCache);
-                    if(rilCtx.urcIndicationCallback != NULL)
-                    {
-                        rilCtx.urcIndicationCallback(&urcInfo); // Call user-defined callback
-                    }
+            RIL_LOG_TRACE("RIL_ServiceRoutine received: %s", lineCache);
+
+            RIL_URCInfo urcInfo;
+            bool urcDetected = RIL_ParseURC(lineCache, &urcInfo); // Parse URC parameters
+            if (urcDetected) {
+                RIL_LOG_TRACE("URC detected: %u ,%s", urcInfo.urcType, lineCache);
+                if (rilCtx.urcIndicationCallback != NULL) {
+                    rilCtx.urcIndicationCallback(&urcInfo); // Call user-defined callback
                 }
             }
         }
@@ -159,86 +223,326 @@ Stream_Result RIL_errorHandle(void) {
     return Stream_Ok;
 }
 
-RIL_ATSndError _RIL_SendATCmd(const char* atCmd, uint32_t atCmdLen,
-                              Callback_ATResponse atRsp_callBack, void* userData,
-                              bool waitForPrompt, uint32_t timeOut) {
+// ============================================================================
+// Helper Functions for Common Operations
+// ============================================================================
+
+/**
+ * @brief Get current system tick
+ */
+static uint32_t _RIL_GetCurrentTick(void) {
+#if RIL_USE_OS
+    return osKernelGetTickCount();
+#else
+    return HAL_GetTick();
+#endif
+}
+
+/**
+ * @brief Delay for specified milliseconds
+ */
+static void _RIL_Delay(uint32_t ms) {
+#if RIL_USE_OS
+    osDelay(ms);
+#else
+    HAL_Delay(ms);
+#endif
+}
+
+/**
+ * @brief Acquire exclusive access to RIL and validate initialization
+ * @return RIL_AT_SUCCESS if acquired, RIL_AT_UNINITIALIZED otherwise
+ */
+static RIL_ATSndError _RIL_AcquireAccess(void) {
     _RIL_ERROR_RESET();
+    _RIL_Lock();
 
     if (!rilCtx.initialized) {
+        _RIL_Unlock();
         return RIL_AT_UNINITIALIZED;
     }
 
-    static char lineCache[RIL_LINE_LEN];
     rilCtx.state = RIL_BUSY;
+    return RIL_AT_SUCCESS;
+}
 
+/**
+ * @brief Release RIL access and reset state
+ * @param resetOperationMode If true, reset operation mode to normal
+ */
+static void _RIL_ReleaseAccess(bool resetOperationMode) {
+    rilCtx.state = RIL_READY;
+    if (resetOperationMode) {
+        RIL_SetOperationNormal();
+    }
+    _RIL_Unlock();
+}
+
+/**
+ * @brief Wait for and process response from module
+ * @param lineCache Buffer to store response line
+ * @param timeOut Absolute timeout tick value
+ * @param atRsp_callBack Response callback function
+ * @param userData User data for callback
+ * @param checkEcho If true, check for command echo
+ * @param echoCmd Command string to match for echo (only used if checkEcho is true)
+ * @return RIL_AT_SUCCESS, RIL_AT_FAILED, or RIL_AT_TIMEOUT
+ */
+static RIL_ATSndError _RIL_WaitForResponse(char* lineCache, uint32_t timeOut,
+                                           Callback_ATResponse atRsp_callBack, void* userData,
+                                           bool checkEcho, const char* echoCmd) {
+    bool echoSeen = !checkEcho; // If not checking echo, consider it already seen
+
+    while (_RIL_GetCurrentTick() < timeOut) {
+        if (IStream_available(&rilCtx.stream.Input) > 0) {
+            Stream_LenType len = IStream_readBytesUntilPattern(
+                &rilCtx.stream.Input, (uint8_t*) CRLF, CRLFLen, (uint8_t*) lineCache, RIL_LINE_LEN);
+
+            if (len > CRLFLen) {
+                len -= CRLFLen;
+                if (lineCache[len - 1] == '\r') {
+                    len--;
+                }
+                lineCache[len] = 0;
+
+                // Check for echo if needed
+                if (checkEcho && !echoSeen && echoCmd != NULL) {
+                    if (Str_compareFix(lineCache, echoCmd, len) == 0) {
+                        RIL_LOG_TRACE("Echo seen: %s", lineCache);
+                        echoSeen = true;
+                        continue;
+                    } else {
+                        RIL_LOG_TRACE("Response line: %s", lineCache);
+                    }
+                }
+
+                if (echoSeen) {
+                    // Check for error response
+                    uint16_t errCode;
+                    _RIL_ERROR_SET(0);
+                    if (_lineIsError(lineCache, len, &errCode) > 0) {
+                        RIL_LOG_ERROR("Error response: %s", lineCache);
+                        _RIL_ERROR_SET(errCode);
+                        return RIL_AT_FAILED;
+                    }
+
+                    // Process through callback if provided
+                    if (atRsp_callBack != NULL) {
+                        // Check if response is printable for logging
+                        bool allPrintable = true;
+                        for (uint32_t i = 0; i < len; i++) {
+                            if (lineCache[i] >= 127) {
+                                allPrintable = false;
+                                break;
+                            }
+                        }
+                        if (allPrintable) {
+                            RIL_LOG_TRACE("Response: %s", lineCache);
+                        }
+
+                        int32_t ret = atRsp_callBack(lineCache, len, userData);
+                        if (ret == RIL_ATRSP_CONTINUE) {
+                            if (_lineIsURC(lineCache)) {
+                                RIL_URCInfo urc;
+                                RIL_ParseURC(lineCache, &urc);
+                                RIL_LOG_TRACE("URC received: %s", lineCache);
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                return RIL_AT_SUCCESS;
+            }
+        }
+        _RIL_Delay(1);
+    }
+
+    RIL_LOG_TRACE("Response timeout");
+    return RIL_AT_TIMEOUT;
+}
+
+/**
+ * @brief Send chunked binary data with buffer management
+ * @param data Data to send
+ * @param dataLen Length of data
+ * @return Stream_Ok on success, error code otherwise
+ */
+static Stream_Result _RIL_SendChunkedData(const uint8_t* data, uint32_t dataLen) {
+    uint32_t totalSent = 0;
+
+    while (totalSent < dataLen) {
+        Stream_LenType availableSpace = OStream_space(&rilCtx.stream.Output);
+        uint32_t remainingData = dataLen - totalSent;
+        uint32_t chunkSize = (remainingData < availableSpace) ? remainingData : availableSpace;
+
+        if (chunkSize == 0) {
+            RIL_LOG_TRACE("Buffer full, waiting for space...");
+            uint32_t waitStart = _RIL_GetCurrentTick();
+            while (OStream_space(&rilCtx.stream.Output) == 0) {
+                if (_RIL_GetCurrentTick() - waitStart > 5000) {
+                    RIL_LOG_ERROR("Timeout waiting for buffer space");
+                    return Stream_NoSpace;
+                }
+                _RIL_Delay(10);
+            }
+            continue;
+        }
+
+        Stream_Result err =
+            OStream_writeBytes(&rilCtx.stream.Output, (uint8_t*) (data + totalSent), chunkSize);
+        if (err) {
+            RIL_LOG_ERROR("Failed to write chunk: %u bytes at offset %u, error=%d", chunkSize,
+                          totalSent, err);
+            return err;
+        }
+
+        totalSent += chunkSize;
+        RIL_LOG_TRACE("Chunk written: %u bytes (total: %u/%u)", chunkSize, totalSent, dataLen);
+
+        err = OStream_flush(&rilCtx.stream.Output);
+        if (err && err != Stream_InTransmit) {
+            RIL_LOG_ERROR("Failed to flush: error=%d", err);
+            return err;
+        }
+    }
+
+    return Stream_Ok;
+}
+
+/**
+ * @brief Wait for all pending data to be transmitted
+ * @param dataLen Length of data sent (used for timeout calculation)
+ * @return Stream_Ok on success, error code otherwise
+ */
+static Stream_Result _RIL_WaitForTransmitComplete(uint32_t dataLen) {
+    uint32_t flushTimeout = (dataLen / 10) + 2000;
+    uint32_t flushStart = _RIL_GetCurrentTick();
+    uint32_t lastPending = OStream_pendingBytes(&rilCtx.stream.Output);
+    uint32_t stuckCount = 0;
+    const uint32_t progressCheckInterval = 10;
+
+    while (OStream_pendingBytes(&rilCtx.stream.Output) > 0) {
+        if (_RIL_GetCurrentTick() - flushStart > flushTimeout) {
+            RIL_LOG_ERROR("Transmission timeout: %u bytes still pending",
+                          OStream_pendingBytes(&rilCtx.stream.Output));
+            return Stream_TransmitFailed;
+        }
+
+        uint32_t currentPending = OStream_pendingBytes(&rilCtx.stream.Output);
+        if (currentPending == lastPending) {
+            stuckCount++;
+            if (stuckCount > 100) {
+                RIL_LOG_ERROR("Transmission stuck: %u bytes pending, no progress for 1s",
+                              currentPending);
+                return Stream_TransmitFailed;
+            }
+        } else {
+            if (stuckCount > 0) {
+                RIL_LOG_TRACE("Progress: %u bytes remaining", currentPending);
+            }
+            stuckCount = 0;
+            lastPending = currentPending;
+        }
+
+        _RIL_Delay(progressCheckInterval);
+    }
+
+    RIL_LOG_TRACE("All data transmitted successfully: %u bytes", dataLen);
+    return Stream_Ok;
+}
+
+// ============================================================================
+// Main API Functions
+// ============================================================================
+
+RIL_ATSndError _RIL_SendATCmd(const char* atCmd, uint32_t atCmdLen,
+                              Callback_ATResponse atRsp_callBack, void* userData,
+                              bool waitForPrompt, uint32_t timeOut) {
+    // Acquire exclusive access
+    RIL_ATSndError accessResult = _RIL_AcquireAccess();
+    if (accessResult != RIL_AT_SUCCESS) {
+        return accessResult;
+    }
+
+    static char lineCache[RIL_LINE_LEN];
     RIL_LOG_TRACE("Sending AT command: %s", atCmd);
 
+    // Set default timeout if not specified (5 seconds)
     if (timeOut == 0) {
-        /* 5 sec -> 5000ms */
-        timeOut += 5000;
+        timeOut = 5000;
     }
-    timeOut += HAL_GetTick();
+    uint32_t absoluteTimeout = _RIL_GetCurrentTick() + timeOut;
 
-    // Copy command to buffer
+    // Prepare command: copy to buffer and append CRLF
     Str_copyFix(lineCache, atCmd, atCmdLen);
-    // Put a null at the end of command
     lineCache[atCmdLen] = 0;
-    // Append CRLF at the end of command
     Str_append(lineCache, CRLF);
-    // Update atCmd and cmdLen
-    atCmd = lineCache;
-    atCmdLen = strlen(lineCache);
+    const char* cmdWithCRLF = lineCache;
+    uint32_t cmdLen = strlen(lineCache);
 
-    Stream_Result streamErrCode =
-        OStream_writeBytes(&rilCtx.stream.Output, (uint8_t*) atCmd, atCmdLen);
-    streamErrCode = OStream_flush(&rilCtx.stream.Output);
-    if (streamErrCode) {
-        goto onError;
+    // Send command
+    Stream_Result streamErr =
+        OStream_writeBytes(&rilCtx.stream.Output, (uint8_t*) cmdWithCRLF, cmdLen);
+    if (streamErr == Stream_Ok) {
+        streamErr = OStream_flush(&rilCtx.stream.Output);
+    }
+    if (streamErr) {
+        RIL_LOG_TRACE("AT command send failed");
+        _RIL_ReleaseAccess(true);
+        return RIL_AT_FAILED;
     }
 
+    // Wait for response with special handling for prompt and binary modes
     bool echoSeen = false;
-    while (HAL_GetTick() < timeOut) {
+    while (_RIL_GetCurrentTick() < absoluteTimeout) {
         if (IStream_available(&rilCtx.stream.Input) > 0) {
             Stream_LenType len;
+
+            // Check for prompt character if waiting for it
             if (waitForPrompt) {
                 len = IStream_readBytesUntil(&rilCtx.stream.Input, (uint8_t) '>',
                                              (uint8_t*) lineCache, RIL_LINE_LEN);
-
                 if (len > 0) {
                     RIL_LOG_TRACE("Prompt character '>' detected");
-                    goto onSuccess;
+                    _RIL_ReleaseAccess(true);
+                    return RIL_AT_SUCCESS;
                 }
             }
 
+            // Handle based on operation mode
             if (rilCtx.operationMode == RIL_OperationMode_Normal) {
                 len = IStream_readBytesUntilPattern(&rilCtx.stream.Input, (uint8_t*) CRLF, CRLFLen,
                                                     (uint8_t*) lineCache, RIL_LINE_LEN);
                 if (len > CRLFLen) {
-
                     len -= CRLFLen;
                     if (lineCache[len - 1] == '\r') {
                         len--;
                     }
-
                     lineCache[len] = 0;
 
-                    if (!echoSeen && Str_compareFix(lineCache, atCmd, len) == 0) {
+                    // Check for command echo
+                    if (!echoSeen && Str_compareFix(lineCache, cmdWithCRLF, len) == 0) {
                         RIL_LOG_TRACE("Echo seen: %s", lineCache);
                         echoSeen = true;
                         continue;
+                    } else {
+                        RIL_LOG_TRACE("AT command response: %s", lineCache);
                     }
 
                     if (echoSeen) {
-                        // Check that the response is not an error
+                        // Check for error response
                         uint16_t errCode;
                         _RIL_ERROR_SET(0);
                         if (_lineIsError(lineCache, len, &errCode) > 0) {
                             RIL_LOG_ERROR("AT command failed: %s", atCmd);
                             _RIL_ERROR_SET(errCode);
-                            goto onError;
+                            _RIL_ReleaseAccess(true);
+                            return RIL_AT_FAILED;
+                        }
 
-                        } else if (atRsp_callBack != NULL) {
-                            // Check if the response is printable
+                        // Process through callback
+                        if (atRsp_callBack != NULL) {
                             bool allPrintable = true;
                             for (uint32_t i = 0; i < len; i++) {
                                 if (lineCache[i] >= 127) {
@@ -253,131 +557,100 @@ RIL_ATSndError _RIL_SendATCmd(const char* atCmd, uint32_t atCmdLen,
                             int32_t ret = atRsp_callBack(lineCache, len, userData);
                             if (ret == RIL_ATRSP_CONTINUE) {
                                 if (_lineIsURC(lineCache)) {
-
                                     RIL_URCInfo urc;
                                     RIL_ParseURC(lineCache, &urc);
-                                    // TODO: handle URC later
                                 }
                                 continue;
                             }
                         }
                     }
 
-                    goto onSuccess;
+                    RIL_LOG_TRACE("AT command success");
+                    _RIL_ReleaseAccess(true);
+                    return RIL_AT_SUCCESS;
                 }
             } else if (rilCtx.operationMode == RIL_OperationMode_Binary &&
                        rilCtx.expectedBytes > 0) {
-                streamErrCode = IStream_readBytes(&rilCtx.stream.Input, (uint8_t*) lineCache,
-                                                  rilCtx.expectedBytes);
-                if (streamErrCode == Stream_Ok) {
+                // Binary mode: read expected number of bytes
+                streamErr = IStream_readBytes(&rilCtx.stream.Input, (uint8_t*) lineCache,
+                                              rilCtx.expectedBytes);
+                if (streamErr == Stream_Ok) {
                     if (atRsp_callBack != NULL) {
                         int32_t ret = atRsp_callBack(lineCache, rilCtx.expectedBytes, userData);
                         if (ret == RIL_ATRSP_CONTINUE) {
                             RIL_SetOperationNormal();
                             continue;
                         } else if (ret == RIL_ATRSP_SUCCESS) {
-                            goto onSuccess;
+                            _RIL_ReleaseAccess(true);
+                            return RIL_AT_SUCCESS;
                         } else {
-                            goto onError;
+                            _RIL_ReleaseAccess(true);
+                            return RIL_AT_FAILED;
                         }
                     }
-                    goto onSuccess;
+                    _RIL_ReleaseAccess(true);
+                    return RIL_AT_SUCCESS;
                 }
             }
         }
+        _RIL_Delay(1);
     }
 
-    rilCtx.state = RIL_READY;
-    RIL_SetOperationNormal();
+    RIL_LOG_TRACE("AT command timeout");
+    _RIL_ReleaseAccess(true);
     return RIL_AT_TIMEOUT;
-
-onError:
-    rilCtx.state = RIL_READY;
-    RIL_SetOperationNormal();
-    return RIL_AT_FAILED;
-
-onSuccess:
-    rilCtx.state = RIL_READY;
-    RIL_SetOperationNormal();
-    return RIL_AT_SUCCESS;
 }
 
 RIL_ATSndError RIL_SendBinaryData(const uint8_t* data, uint32_t dataLen,
                                   Callback_ATResponse atRsp_callBack, void* userData,
                                   uint32_t timeOut) {
-    _RIL_ERROR_RESET();
-
-    if (!rilCtx.initialized) {
-        return RIL_AT_UNINITIALIZED;
+    // Acquire exclusive access
+    RIL_ATSndError accessResult = _RIL_AcquireAccess();
+    if (accessResult != RIL_AT_SUCCESS) {
+        return accessResult;
     }
 
     char lineCache[RIL_LINE_LEN];
-    rilCtx.state = RIL_BUSY;
-
     RIL_LOG_TRACE("Sending raw data, length: %u", dataLen);
 
+    // Set default timeout if not specified (3 minutes)
     if (timeOut == 0) {
-        /* 3min -> (3*50*1000)ms */
-        timeOut += 1800;
+        timeOut = 180000;
     }
-    timeOut += HAL_GetTick();
+    uint32_t absoluteTimeout = _RIL_GetCurrentTick() + timeOut;
 
-    // Send the raw data
-    Stream_Result streamErrCode =
-        OStream_writeBytes(&rilCtx.stream.Output, (uint8_t*) data, dataLen);
-    streamErrCode = OStream_flush(&rilCtx.stream.Output);
-    if (streamErrCode) {
-        goto onError;
-    }
-
-    while (HAL_GetTick() < timeOut) {
-        if (IStream_available(&rilCtx.stream.Input) > 0) {
-            // Check for complete line
-            Stream_LenType len = IStream_readBytesUntilPattern(
-                &rilCtx.stream.Input, (uint8_t*) CRLF, CRLFLen, (uint8_t*) lineCache, RIL_LINE_LEN);
-            if (len > CRLFLen) {
-                len -= CRLFLen;
-                lineCache[len] = 0;
-
-                // Check for errors
-                uint16_t errCode;
-                _RIL_ERROR_SET(0);
-                if (_lineIsError(lineCache, len, &errCode) > 0) {
-                    RIL_LOG_ERROR("Error response received: %s", lineCache);
-                    _RIL_ERROR_SET(errCode);
-                    goto onError;
-                }
-
-                // Process response through callback if provided
-                if (atRsp_callBack != NULL) {
-                    RIL_LOG_TRACE("Response received: %s", lineCache);
-                    int32_t ret = atRsp_callBack(lineCache, len, userData);
-                    if (ret == RIL_ATRSP_CONTINUE) {
-                        if (_lineIsURC(lineCache)) {
-                            RIL_URCInfo urc;
-                            RIL_ParseURC(lineCache, &urc);
-                            RIL_LOG_TRACE("URC received: %s", lineCache);
-                            // TODO: handle URC if needed
-                        }
-                        continue;
-                    }
-                }
-
-                goto onSuccess;
-            }
-        }
+    // Send data in chunks with buffer management
+    Stream_Result streamErr = _RIL_SendChunkedData(data, dataLen);
+    if (streamErr != Stream_Ok) {
+        RIL_LOG_TRACE("Binary data send failed");
+        _RIL_ReleaseAccess(false);
+        return RIL_AT_FAILED;
     }
 
-    rilCtx.state = RIL_READY;
-    return RIL_AT_TIMEOUT;
+    RIL_LOG_TRACE("All data written to buffer, waiting for transmission to complete...");
 
-onError:
-    rilCtx.state = RIL_READY;
-    return RIL_AT_FAILED;
+    // Wait for transmission to complete
+    streamErr = _RIL_WaitForTransmitComplete(dataLen);
+    if (streamErr != Stream_Ok) {
+        RIL_LOG_TRACE("Binary data transmission failed");
+        _RIL_ReleaseAccess(false);
+        return RIL_AT_FAILED;
+    }
 
-onSuccess:
-    rilCtx.state = RIL_READY;
-    return RIL_AT_SUCCESS;
+    // Wait for response using shared helper (no echo checking for binary data)
+    RIL_ATSndError result =
+        _RIL_WaitForResponse(lineCache, absoluteTimeout, atRsp_callBack, userData, false, NULL);
+
+    if (result == RIL_AT_SUCCESS) {
+        RIL_LOG_TRACE("Binary data success");
+    } else if (result == RIL_AT_TIMEOUT) {
+        RIL_LOG_TRACE("Binary data timeout");
+    } else {
+        RIL_LOG_TRACE("Binary data failed");
+    }
+
+    _RIL_ReleaseAccess(false);
+    return result;
 }
 
 uint16_t RIL_AT_GetErrCode(void) {
@@ -412,6 +685,11 @@ static int32_t okRespCallback(char* line, uint32_t len, void* userData) {
         return RIL_ATRSP_SUCCESS;
     }
     return RIL_ATRSP_CONTINUE;
+}
+
+bool RIL_IsModulePowered(void) {
+    RIL_ATSndError ret = RIL_SendATCmd("AT", 2, okRespCallback, NULL, 500);
+    return ret == RIL_AT_SUCCESS;
 }
 
 static bool RIL_ParseURC(const char* line, RIL_URCInfo* urcInfo) {
@@ -457,4 +735,26 @@ static bool RIL_ParseURC(const char* line, RIL_URCInfo* urcInfo) {
     }
 
     return true;
+}
+
+static void RIL_PowerRestart(RIL_PowerCommandCallback powerCommandCb) {
+    if (powerCommandCb) {
+        powerCommandCb(RIL_POWER_COMMAND_RESTART, 0);
+    }
+}
+
+static void _RIL_Lock(void) {
+#if RIL_USE_OS
+    if (rilCtx.mutex != NULL) {
+        osMutexAcquire(rilCtx.mutex, osWaitForever);
+    }
+#endif
+}
+
+static void _RIL_Unlock(void) {
+#if RIL_USE_OS
+    if (rilCtx.mutex != NULL) {
+        osMutexRelease(rilCtx.mutex);
+    }
+#endif
 }

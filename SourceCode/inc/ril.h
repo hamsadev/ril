@@ -2,17 +2,18 @@
 #define _RIL_H_
 
 #define RIL_RX_STREAM_SIZE 512
-#define RIL_TX_STREAM_SIZE 256
+#define RIL_TX_STREAM_SIZE 512
 
 #include "StreamBuffer.h"
+#include "log.h"
 #include "ril_error.h"
 #include "ril_urc.h"
 #include <stdbool.h>
 
+#define RIL_USE_OS 1
 #define RIL_LOG_ENABLE 0
 
 #if RIL_LOG_ENABLE
-#include "log.h"
 #define RIL_LOG_TRACE(fmt, ...) logTrace(fmt, ##__VA_ARGS__)
 #define RIL_LOG_WARN(fmt, ...) logWarn(fmt, ##__VA_ARGS__)
 #define RIL_LOG_ERROR(fmt, ...) logError(fmt, ##__VA_ARGS__)
@@ -38,17 +39,43 @@ typedef enum {
     RIL_READY,
 } RILState;
 
-/**
- * @brief RIL_SendATCmd response callback type
- *
- */
-typedef int32_t(*Callback_ATResponse)(char* line, uint32_t len, void* userData);
+typedef enum {
+    RIL_POWER_COMMAND_OFF,
+    RIL_POWER_COMMAND_ON,
+    RIL_POWER_COMMAND_RESTART,
+} RIL_PowerCommand;
 
 /**
- * @brief // TODO: Write a brief
- *
+ * @brief RIL_SendATCmd response callback type
+ * @param line [in]Response line
+ * @param len [in]Response length
+ * @param userData [in]User data
+ * @return Response result
+ *         - RIL_ATRSP_SUCCESS: Success
+ *         - RIL_ATRSP_CONTINUE: Continue
+ *         - RIL_ATRSP_FAILED: Failed
+ */
+typedef int32_t (*Callback_ATResponse)(char* line, uint32_t len, void* userData);
+
+/**
+ * @brief URC indication callback type
+ * @param info [in]URC information
  */
 typedef void (*RIL_URCIndicationCallback)(RIL_URCInfo* info);
+
+
+/**
+ * @brief Power command callback type
+ * @param powerCmd [in]Power command
+ * @param delayMs [in]Delay in milliseconds
+ */
+typedef void (*RIL_PowerCommandCallback)(RIL_PowerCommand powerCmd, uint32_t delayMs);
+
+/**
+ * @brief Initialization result callback type
+ * @param result [in]Initialization result (RIL_ATSndError)
+ */
+typedef void (*RIL_InitialResultCallback)(RIL_ATSndError result);
 
 /**
  * @brief Deinitialize the RIL device, this function is used to deinitialize the RIL device
@@ -62,11 +89,19 @@ RIL_ATSndError RIL_deInitialize(void);
  * @param uart
  * @return RIL_ATSndError
  */
-RIL_ATSndError RIL_initialize(UART_HandleTypeDef* uart, RIL_URCIndicationCallback urcCb);
+RIL_ATSndError RIL_initialize(UART_HandleTypeDef* uart, RIL_URCIndicationCallback urcCb, RIL_PowerCommandCallback powerCommandCb, RIL_InitialResultCallback initialResultCb);
 
 /**
- * @brief // TODO: Write a brief
- *
+ * @brief Service routine for processing URC (Unsolicited Response Codes)
+ * 
+ * This function should be called continuously to detect and process URC messages
+ * from the cellular module. It checks for incoming URC messages when RIL is in
+ * READY state and forwards them to the registered URC callback.
+ * 
+ * @note This function is thread-safe and uses mutex to prevent conflicts with
+ *       concurrent AT command processing.
+ * @note RIL_ServiceRoutine should be called with a short delay (e.g., 50ms)
+ *       in a dedicated task to ensure responsive URC detection.
  */
 void RIL_ServiceRoutine(void);
 
@@ -113,6 +148,11 @@ Stream_Result RIL_txCpltHandle(void);
  *   being returned synchronously.The response of the AT command
  *   will be reported to the callback function,you can get the results
  *   you want in it.
+ * 
+ * @note This function is thread-safe and uses mutex to ensure exclusive access.
+ *       Multiple threads can safely call this function concurrently, and they will
+ *       be serialized to prevent interference with each other.
+ * 
  * @param atCmd [in]AT command string.
  * @param atCmdLen [in]The length of AT command string.
  * @param atRsp_callBack [in]Callback function for handle the response of the AT command.
@@ -123,13 +163,15 @@ Stream_Result RIL_txCpltHandle(void);
  * @return A member of RIL_ATSndError enum
  */
 RIL_ATSndError _RIL_SendATCmd(const char* atCmd, uint32_t atCmdLen,
-    Callback_ATResponse atRsp_callBack, void* userData,
-    bool waitForPrompt, uint32_t timeOut);
+                              Callback_ATResponse atRsp_callBack, void* userData,
+                              bool waitForPrompt, uint32_t timeOut);
 
 /**
  * @brief This function implements sending binary data with the result
  *        being returned synchronously.
  *
+ * @note This function is thread-safe and uses mutex to ensure exclusive access.
+ * 
  * @param data [in]Pointer to the binary data to be sent.
  * @param dataLen [in]Length of the binary data to be sent.
  * @param atRsp_callBack [in]Callback function for handle the response of the AT command.
@@ -139,8 +181,8 @@ RIL_ATSndError _RIL_SendATCmd(const char* atCmd, uint32_t atCmdLen,
  * @return A member of RIL_ATSndError enum
  */
 RIL_ATSndError RIL_SendBinaryData(const uint8_t* data, uint32_t dataLen,
-    Callback_ATResponse atRsp_callBack, void* userData,
-    uint32_t timeOut);
+                                  Callback_ATResponse atRsp_callBack, void* userData,
+                                  uint32_t timeOut);
 
 /**
  * @brief This function retrieves the specific error code after executing AT failed.
@@ -163,15 +205,22 @@ void RIL_AT_SetErrCode(uint16_t errCode);
  */
 RILState RIL_GetState(void);
 
+/**
+ * @brief Check if the RIL module is powered and responding
+ *
+ * @return bool true if module is powered and responding, false otherwise
+ */
+bool RIL_IsModulePowered(void);
+
 static inline RIL_ATSndError RIL_SendATCmd(const char* atCmd, uint32_t atCmdLen,
-    Callback_ATResponse atRsp_callBack, void* userData,
-    uint32_t timeOut) {
+                                           Callback_ATResponse atRsp_callBack, void* userData,
+                                           uint32_t timeOut) {
     return _RIL_SendATCmd(atCmd, atCmdLen, atRsp_callBack, userData, false, timeOut);
 }
 
 static inline RIL_ATSndError RIL_SendATCmdWithPrompt(const char* atCmd, uint32_t atCmdLen,
-    Callback_ATResponse atRsp_callBack,
-    void* userData, uint32_t timeOut) {
+                                                     Callback_ATResponse atRsp_callBack,
+                                                     void* userData, uint32_t timeOut) {
     return _RIL_SendATCmd(atCmd, atCmdLen, atRsp_callBack, userData, true, timeOut);
 }
 
