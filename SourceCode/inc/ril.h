@@ -5,7 +5,6 @@
 #define RIL_TX_STREAM_SIZE 256
 
 #include "StreamBuffer.h"
-#include "log.h"
 #include "ril_error.h"
 #include "ril_urc.h"
 #include <stdbool.h>
@@ -13,6 +12,7 @@
 #define RIL_LOG_ENABLE 0
 
 #if RIL_LOG_ENABLE
+#include "log.h"
 #define RIL_LOG_TRACE(fmt, ...) logTrace(fmt, ##__VA_ARGS__)
 #define RIL_LOG_WARN(fmt, ...) logWarn(fmt, ##__VA_ARGS__)
 #define RIL_LOG_ERROR(fmt, ...) logError(fmt, ##__VA_ARGS__)
@@ -42,7 +42,7 @@ typedef enum {
  * @brief RIL_SendATCmd response callback type
  *
  */
-typedef int32_t (*Callback_ATResponse)(char* line, uint32_t len, void* userData);
+typedef int32_t(*Callback_ATResponse)(char* line, uint32_t len, void* userData);
 
 /**
  * @brief // TODO: Write a brief
@@ -123,8 +123,8 @@ Stream_Result RIL_txCpltHandle(void);
  * @return A member of RIL_ATSndError enum
  */
 RIL_ATSndError _RIL_SendATCmd(const char* atCmd, uint32_t atCmdLen,
-                              Callback_ATResponse atRsp_callBack, void* userData,
-                              bool waitForPrompt, uint32_t timeOut);
+    Callback_ATResponse atRsp_callBack, void* userData,
+    bool waitForPrompt, uint32_t timeOut);
 
 /**
  * @brief This function implements sending binary data with the result
@@ -139,8 +139,8 @@ RIL_ATSndError _RIL_SendATCmd(const char* atCmd, uint32_t atCmdLen,
  * @return A member of RIL_ATSndError enum
  */
 RIL_ATSndError RIL_SendBinaryData(const uint8_t* data, uint32_t dataLen,
-                                  Callback_ATResponse atRsp_callBack, void* userData,
-                                  uint32_t timeOut);
+    Callback_ATResponse atRsp_callBack, void* userData,
+    uint32_t timeOut);
 
 /**
  * @brief This function retrieves the specific error code after executing AT failed.
@@ -164,14 +164,14 @@ void RIL_AT_SetErrCode(uint16_t errCode);
 RILState RIL_GetState(void);
 
 static inline RIL_ATSndError RIL_SendATCmd(const char* atCmd, uint32_t atCmdLen,
-                                           Callback_ATResponse atRsp_callBack, void* userData,
-                                           uint32_t timeOut) {
+    Callback_ATResponse atRsp_callBack, void* userData,
+    uint32_t timeOut) {
     return _RIL_SendATCmd(atCmd, atCmdLen, atRsp_callBack, userData, false, timeOut);
 }
 
 static inline RIL_ATSndError RIL_SendATCmdWithPrompt(const char* atCmd, uint32_t atCmdLen,
-                                                     Callback_ATResponse atRsp_callBack,
-                                                     void* userData, uint32_t timeOut) {
+    Callback_ATResponse atRsp_callBack,
+    void* userData, uint32_t timeOut) {
     return _RIL_SendATCmd(atCmd, atCmdLen, atRsp_callBack, userData, true, timeOut);
 }
 
