@@ -10,7 +10,7 @@
 #include "ril_urc.h"
 #include <stdbool.h>
 
-#define RIL_USE_OS 1
+#define RIL_USE_OS 0
 #define RIL_LOG_ENABLE 0
 
 #if RIL_LOG_ENABLE

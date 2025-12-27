@@ -15,6 +15,9 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#if RIL_USE_OS
+#include "cmsis_os2.h"
+#endif
 
 #define RIL_INIT_RETRY 10
 #define RIL_LINE_LEN 512
