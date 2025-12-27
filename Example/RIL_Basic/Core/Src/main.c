@@ -58,6 +58,7 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void _RIL_PowerCommandCallback(RIL_PowerCommand powerCmd);
 static int32_t okRespCallback(char *line, uint32_t len, void *userData)
 {
   int8_t cmpRet = strncmp(line, "OK", len);
@@ -107,10 +108,11 @@ int main(void)
   // Initialize serial log module for debug output
   SerialLog_Init(&huart5);
   HAL_TIM_Base_Start_IT(&htim6);
-  if(RIL_initialize(&huart1, NULL) != RIL_AT_SUCCESS)
+  if (RIL_initialize(&huart1, NULL, _RIL_PowerCommandCallback, NULL) != RIL_AT_SUCCESS)
   {
     logError("RIL initialization failed");
-    while(1);
+    while (1)
+      ;
   }
 
   logInfo("RIL initialization success");
@@ -174,7 +176,52 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM6)
+  {
+    SerialLog_Routine();
+  }
+}
 
+static void _RIL_PowerCommandCallback(RIL_PowerCommand powerCmd)
+{
+  switch (powerCmd)
+  {
+  case RIL_POWER_COMMAND_ON:
+  case RIL_POWER_COMMAND_OFF:
+    HAL_GPIO_WritePin(EC_PWR_KEY_GPIO_Port, EC_PWR_KEY_Pin, GPIO_PIN_RESET);
+    HAL_Delay(3000);
+    HAL_GPIO_WritePin(EC_PWR_KEY_GPIO_Port, EC_PWR_KEY_Pin, GPIO_PIN_SET);
+    HAL_Delay(3000);
+  case RIL_POWER_COMMAND_RESTART:
+    HAL_GPIO_WritePin(EC_RST_GPIO_Port, EC_RST_Pin, GPIO_PIN_RESET);
+    HAL_Delay(150);
+    HAL_GPIO_WritePin(EC_RST_GPIO_Port, EC_RST_Pin, GPIO_PIN_SET);
+    break;
+  }
+}
+
+/* USER CODE BEGIN 4 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  switch ((uint32_t)huart->Instance)
+  {
+  case USART1_BASE:
+    RIL_rxCpltHandle();
+    break;
+  }
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+  switch ((uint32_t)huart->Instance)
+  {
+  case USART1_BASE:
+    RIL_txCpltHandle();
+    break;
+  }
+}
 /* USER CODE END 4 */
 
 /**
@@ -191,7 +238,6 @@ void Error_Handler(void)
   }
   /* USER CODE END Error_Handler_Debug */
 }
-
 #ifdef USE_FULL_ASSERT
 /**
  * @brief  Reports the name of the source file and the source line number
