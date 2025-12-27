@@ -67,9 +67,8 @@ typedef void (*RIL_URCIndicationCallback)(RIL_URCInfo* info);
 /**
  * @brief Power command callback type
  * @param powerCmd [in]Power command
- * @param delayMs [in]Delay in milliseconds
  */
-typedef void (*RIL_PowerCommandCallback)(RIL_PowerCommand powerCmd, uint32_t delayMs);
+typedef void (*RIL_PowerCommandCallback)(RIL_PowerCommand powerCmd);
 
 /**
  * @brief Initialization result callback type

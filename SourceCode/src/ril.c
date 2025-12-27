@@ -10,7 +10,6 @@
  */
 
 #include "ril.h"
-#include "cmsis_os2.h"
 #include "ril_urc.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -171,6 +170,7 @@ RIL_ATSndError RIL_initialize(UART_HandleTypeDef* uart, RIL_URCIndicationCallbac
             } else {
                 // Power off and restart the module
                 RIL_PowerRestart(rilCtx.powerCommandCallback);
+				_RIL_Delay(1000);
 
                 moduleRestarted = true;
                 retryCount++;
@@ -178,6 +178,7 @@ RIL_ATSndError RIL_initialize(UART_HandleTypeDef* uart, RIL_URCIndicationCallbac
         } else {
             // Initialization failed, try power cycle
             RIL_PowerRestart(rilCtx.powerCommandCallback);
+			_RIL_Delay(1000);
             moduleRestarted = true;
             retryCount++;
         }
@@ -742,7 +743,7 @@ static bool RIL_ParseURC(const char* line, RIL_URCInfo* urcInfo) {
 
 static void RIL_PowerRestart(RIL_PowerCommandCallback powerCommandCb) {
     if (powerCommandCb) {
-        powerCommandCb(RIL_POWER_COMMAND_RESTART, 0);
+        powerCommandCb(RIL_POWER_COMMAND_RESTART);
     }
 }
 
